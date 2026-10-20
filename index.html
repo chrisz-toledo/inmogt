@@ -3524,8 +3524,12 @@
               Descarga el esquema con el botón de abajo y pégalo en el <em>SQL Editor</em> de Supabase para crear la tabla multi-empresa con seguridad RLS.
             </div>
             <div class="publish-step-card">
-              <strong>3. Pega URL y Anon Key</strong>
-              Conecta la URL y tu clave abajo para sincronizar los cobros del teléfono de tu amigo y de sus cobradores en tiempo real.
+              <strong>3. Pega URL y Anon Key + crea usuarios</strong>
+              Conecta la URL y tu clave abajo. Luego crea los usuarios en Supabase (Authentication → Users) y vincúlalos a su empresa con el SQL del paso 2.
+            </div>
+            <div class="publish-step-card">
+              <strong>4. Inicia sesión</strong>
+              Cada persona entra con su email y contraseña. La nube solo deja ver la(s) empresa(s) asignada(s) a ese usuario.
             </div>
           </div>
           <div class="colindancias-grid">
@@ -3537,6 +3541,23 @@
               <label for="supaKeyInput">Supabase Anon Public Key</label>
               <input id="supaKeyInput" type="password" placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...">
             </div>
+          </div>
+          <div class="colindancias-grid">
+            <div class="field">
+              <label for="supaAuthEmail">Usuario (email de Supabase Auth)</label>
+              <input id="supaAuthEmail" type="email" placeholder="usuario@lotificadora.com" autocomplete="username">
+            </div>
+            <div class="field">
+              <label for="supaAuthPass">Contraseña</label>
+              <input id="supaAuthPass" type="password" placeholder="••••••••" autocomplete="current-password">
+            </div>
+          </div>
+          <div class="calc-stack">
+            <div class="calc-row"><span>Estado de sesión</span><strong id="supaAuthStatusText">🔒 Sin sesión: la nube requiere iniciar sesión</strong></div>
+          </div>
+          <div class="modal-actions" style="justify-content:flex-end;flex-wrap:wrap;margin-bottom:10px">
+            <button type="button" class="button" id="btnSupaLogin">🔓 Iniciar sesión</button>
+            <button type="button" class="button secondary" id="btnSupaLogout" style="display:none">🔒 Cerrar sesión</button>
           </div>
           <div class="calc-stack">
             <div class="calc-row"><span>Estado de sincronización en la nube</span><strong id="supaSyncStatusText">Modo Local Activo (Listo para conectar a Supabase REST API)</strong></div>
@@ -9885,6 +9906,139 @@
       // ARQUITECTURA V12: MOTOR SAAS TIPO 4, ONBOARDING BETA TESTER PARA AMIGO,
       // MULTI-EMPRESA (MULTI-TENANT), ROLES Y CONECTOR SUPABASE CLOUD
       // =========================================================================
+      // =========================================================================
+      // AUTH REAL V13.1 (Supabase Auth): la nube exige sesión con JWT.
+      // - El PIN local sigue como desbloqueo rápido del dispositivo, pero NUNCA
+      //   autoriza nada en el servidor: eso lo hace el access_token de Supabase.
+      // - Sin dependencia nueva: usa la Auth REST API directo con la anon key.
+      // =========================================================================
+      var SUPA_SESSION_KEY = 'inmoguate_supa_session_v1';
+
+      function supaGetSession() {
+        try {
+          var raw = localStorage.getItem(SUPA_SESSION_KEY);
+          if (!raw) return null;
+          var s = JSON.parse(raw);
+          if (!s || !s.access_token) return null;
+          return s;
+        } catch (e) { return null; }
+      }
+
+      function supaSaveSession(s) {
+        try {
+          if (!s) { localStorage.removeItem(SUPA_SESSION_KEY); return; }
+          s.expires_at = Date.now() + ((s.expires_in || 3600) * 1000);
+          localStorage.setItem(SUPA_SESSION_KEY, JSON.stringify(s));
+        } catch (e) {}
+      }
+
+      function supaSessionValid() {
+        var s = supaGetSession();
+        return !!(s && s.access_token && s.expires_at && s.expires_at > Date.now() + 30000);
+      }
+
+      function supaAuthHeaders() {
+        var h = { 'apikey': saasMeta.supaKey, 'Content-Type': 'application/json' };
+        var s = supaGetSession();
+        h['Authorization'] = 'Bearer ' + ((s && s.access_token) ? s.access_token : saasMeta.supaKey);
+        return h;
+      }
+
+      async function supaLogin(email, password) {
+        var url = (saasMeta.supaUrl || '').replace(/\/$/, '');
+        var res = await fetch(url + '/auth/v1/token?grant_type=password', {
+          method: 'POST',
+          headers: { 'apikey': saasMeta.supaKey, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: email, password: password })
+        });
+        if (!res.ok) {
+          var errBody = {};
+          try { errBody = await res.json(); } catch (e) {}
+          throw new Error(errBody.msg || errBody.error_description || ('HTTP ' + res.status));
+        }
+        var data = await res.json();
+        supaSaveSession(data);
+        return data;
+      }
+
+      async function supaRefreshSession() {
+        var s = supaGetSession();
+        if (!s || !s.refresh_token) throw new Error('Sin refresh token');
+        var url = (saasMeta.supaUrl || '').replace(/\/$/, '');
+        var res = await fetch(url + '/auth/v1/token?grant_type=refresh_token', {
+          method: 'POST',
+          headers: { 'apikey': saasMeta.supaKey, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refresh_token: s.refresh_token })
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        var data = await res.json();
+        if (!data.refresh_token) data.refresh_token = s.refresh_token;
+        supaSaveSession(data);
+        return data;
+      }
+
+      function supaLogout() {
+        supaSaveSession(null);
+        renderSupaAuthState();
+      }
+
+      // Fetch con JWT + refresh automático una vez ante 401
+      async function supaFetchWithAuth(url, options) {
+        options = options || {};
+        var merged = function () {
+          var h = supaAuthHeaders();
+          var extra = options.headers || {};
+          Object.keys(extra).forEach(function (k) { h[k] = extra[k]; });
+          var o = {};
+          Object.keys(options).forEach(function (k) { o[k] = options[k]; });
+          o.headers = h;
+          return o;
+        };
+        var res = await fetch(url, merged());
+        if (res.status === 401) {
+          try {
+            await supaRefreshSession();
+            res = await fetch(url, merged());
+          } catch (e) { /* cae al manejo normal de error */ }
+        }
+        return res;
+      }
+
+      // Membresías del usuario logueado: los únicos tenants que puede tocar.
+      // El servidor (RLS) es quien hace cumplir el aislamiento; esto es solo UX.
+      async function supaFetchMembers() {
+        var url = (saasMeta.supaUrl || '').replace(/\/$/, '');
+        var res = await supaFetchWithAuth(url + '/rest/v1/inmoguate_members?select=tenant_id,role', {});
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      }
+
+      function supaRequireLogin() {
+        if (!supaSessionValid()) {
+          showToast('🔐 Inicia sesión con tu usuario de Supabase para usar la nube');
+          return false;
+        }
+        return true;
+      }
+
+      function renderSupaAuthState() {
+        var s = supaGetSession();
+        var logged = !!(s && s.access_token);
+        var emailEl = document.getElementById('supaAuthEmail');
+        var passEl = document.getElementById('supaAuthPass');
+        var loginBtn = document.getElementById('btnSupaLogin');
+        var logoutBtn = document.getElementById('btnSupaLogout');
+        var statusEl = document.getElementById('supaAuthStatusText');
+        if (emailEl) emailEl.disabled = logged;
+        if (passEl) { passEl.disabled = logged; if (logged) passEl.value = ''; }
+        if (loginBtn) loginBtn.style.display = logged ? 'none' : '';
+        if (logoutBtn) logoutBtn.style.display = logged ? '' : 'none';
+        if (statusEl) {
+          statusEl.textContent = logged
+            ? '🔓 Sesión activa: ' + (s.user && s.user.email ? s.user.email : 'usuario')
+            : '🔒 Sin sesión: la nube requiere iniciar sesión';
+        }
+      }
       var SAAS_META_KEY = 'inmoguate_saas_meta_v12';
       var saasMeta = {
         activeTenant: 'default',
@@ -10215,24 +10369,141 @@
         btnDownloadSql.addEventListener('click', function () {
           var sqlScript = [
             "-- ============================================================================",
-            "-- INMOGUATE SAAS (TIPO 4) - ESQUEMA POSTGRESQL + RLS PARA SUPABASE CLOUD",
-            "-- Ejecuta este script en el SQL Editor de tu proyecto gratuito en supabase.com",
+            "-- INMOGUATE PRO V13.1 - ESQUEMA POSTGRESQL CON AUTH REAL (SUPABASE AUTH + RLS)",
+            "-- Aislamiento real por tenant: solo miembros autenticados leen/escriben su tenant.",
+            "-- La anon key es pública por diseño; con este RLS es segura aunque se filtre.",
             "-- ============================================================================",
+            "-- INSTRUCCIONES:",
+            "-- 1. Entra a https://supabase.com y abre tu proyecto.",
+            "-- 2. Ve a \"SQL Editor\" -> \"New Query\".",
+            "-- 3. Pega todo este archivo y haz clic en \"Run\".",
+            "-- 4. En Authentication -> Users, crea un usuario (email + password) por cada",
+            "--    persona que usará la app (dueño, oficina, cobrador).",
+            "-- 5. Vincula cada usuario a su tenant (ver EJEMPLO al final de este archivo).",
+            "-- 6. En la app: pestaña Nube Supabase -> pega URL + Anon Key -> Iniciar sesión.",
+            "-- ============================================================================",
+            "",
+            "-- 1) TABLAS BASE (igual que v1: el negocio vive en payload jsonb por tenant)",
             "create table if not exists public.inmoguate_tenants (",
             "  tenant_id text primary key,",
             "  business_name text not null,",
-            "  plan_name text default 'Beta Gratis (Tester)',",
+            "  plan_name text not null default 'Licencia Fundador 10 Años Gratis (2026-2036)',",
+            "  valid_until date not null default '2036-10-18',",
+            "  users jsonb not null default '[]'::jsonb,",
             "  payload jsonb not null default '{}'::jsonb,",
             "  updated_at timestamptz not null default now()",
             ");",
             "",
-            "alter table public.inmoguate_tenants enable row level security;",
+            "create table if not exists public.inmoguate_users (",
+            "  user_id text primary key,",
+            "  tenant_id text not null references public.inmoguate_tenants(tenant_id) on delete cascade,",
+            "  full_name text not null,",
+            "  role text not null check (role in ('admin', 'office', 'collector')),",
+            "  phone text,",
+            "  pin_code text not null default '1234',",
+            "  created_at timestamptz not null default now()",
+            ");",
             "",
-            'create policy "Permitir lectura y escritura por tenant_id"',
+            "-- 2) MEMBRESÍAS: qué usuario de Supabase Auth pertenece a qué tenant.",
+            "--    Esta tabla es la que hace real el aislamiento multi-tenant.",
+            "create table if not exists public.inmoguate_members (",
+            "  user_id uuid not null references auth.users(id) on delete cascade,",
+            "  tenant_id text not null references public.inmoguate_tenants(tenant_id) on delete cascade,",
+            "  role text not null check (role in ('admin', 'office', 'collector')),",
+            "  created_at timestamptz not null default now(),",
+            "  primary key (user_id, tenant_id)",
+            ");",
+            "",
+            "-- 3) HELPERS (security definer para evitar recursión en las policies)",
+            "create or replace function public.is_tenant_member(p_tenant text)",
+            "returns boolean",
+            "language sql",
+            "security definer",
+            "stable",
+            "set search_path = public",
+            "as $$",
+            "  select exists (",
+            "    select 1 from public.inmoguate_members m",
+            "    where m.tenant_id = p_tenant and m.user_id = auth.uid()",
+            "  );",
+            "$$;",
+            "",
+            "create or replace function public.is_tenant_admin(p_tenant text)",
+            "returns boolean",
+            "language sql",
+            "security definer",
+            "stable",
+            "set search_path = public",
+            "as $$",
+            "  select exists (",
+            "    select 1 from public.inmoguate_members m",
+            "    where m.tenant_id = p_tenant and m.user_id = auth.uid() and m.role = 'admin'",
+            "  );",
+            "$$;",
+            "",
+            "-- 4) RLS REAL: sin sesión válida, auth.uid() es NULL y todo se deniega.",
+            "alter table public.inmoguate_tenants enable row level security;",
+            "alter table public.inmoguate_users enable row level security;",
+            "alter table public.inmoguate_members enable row level security;",
+            "",
+            "-- Limpiar policies permisivas de v1 si existen",
+            "drop policy if exists \"Acceso multi-tenant inmoguate_tenants\" on public.inmoguate_tenants;",
+            "drop policy if exists \"Acceso multi-usuario inmoguate_users\" on public.inmoguate_users;",
+            "drop policy if exists \"Permitir lectura y escritura por tenant_id\" on public.inmoguate_tenants;",
+            "",
+            "-- Tenants: solo miembros de ese tenant (lectura y escritura)",
+            "drop policy if exists \"tenant_isolation\" on public.inmoguate_tenants;",
+            "create policy \"tenant_isolation\"",
             "  on public.inmoguate_tenants",
             "  for all",
-            "  using (true)",
-            "  with check (true);",
+            "  using (public.is_tenant_member(tenant_id))",
+            "  with check (public.is_tenant_member(tenant_id));",
+            "",
+            "-- Users (operadores locales): mismo aislamiento que su tenant",
+            "drop policy if exists \"tenant_user_isolation\" on public.inmoguate_users;",
+            "create policy \"tenant_user_isolation\"",
+            "  on public.inmoguate_users",
+            "  for all",
+            "  using (public.is_tenant_member(tenant_id))",
+            "  with check (public.is_tenant_member(tenant_id));",
+            "",
+            "-- Members: cada usuario ve sus propias membresías",
+            "drop policy if exists \"own_memberships_read\" on public.inmoguate_members;",
+            "create policy \"own_memberships_read\"",
+            "  on public.inmoguate_members",
+            "  for select",
+            "  using (user_id = auth.uid());",
+            "",
+            "-- Members: solo admins del tenant gestionan membresías de su tenant",
+            "drop policy if exists \"admin_manage_memberships\" on public.inmoguate_members;",
+            "create policy \"admin_manage_memberships\"",
+            "  on public.inmoguate_members",
+            "  for all",
+            "  using (public.is_tenant_admin(tenant_id))",
+            "  with check (public.is_tenant_admin(tenant_id));",
+            "",
+            "-- 5) SEEDS: tenants sin PINs por defecto.",
+            "--    Los PINs de operador se crean en la app al primer uso (desbloqueo local",
+            "--    del dispositivo, NO credencial del servidor).",
+            "insert into public.inmoguate_tenants (tenant_id, business_name, plan_name, valid_until, users)",
+            "values",
+            "  ('friend_founder', 'Inmobiliaria & Lotes Mi Amigo (Socio Fundador)', 'Licencia Fundador 10 Años Gratis (2026-2036)', '2036-10-18', '[]'::jsonb),",
+            "  ('client_pro_1', 'Lotificadora Los Altos S.A.', 'Plan Pro Multi-Proyecto (Q 650/mes)', '2027-10-18', '[]'::jsonb),",
+            "  ('client_pro_2', 'Desarrollos del Sur GT', 'Plan Pro Multi-Proyecto (Q 650/mes)', '2027-10-18', '[]'::jsonb),",
+            "  ('default', 'Cartera Master · Christian Toledo', 'Licencia Master Desarrollador (Ilimitada)', '2099-12-31', '[]'::jsonb)",
+            "on conflict (tenant_id) do nothing;",
+            "",
+            "-- ============================================================================",
+            "-- EJEMPLO: vincular un usuario de Auth a un tenant (reemplaza los valores)",
+            "-- 1. Crea el usuario en Authentication -> Users y copia su UUID.",
+            "-- 2. Corre:",
+            "--",
+            "-- insert into public.inmoguate_members (user_id, tenant_id, role)",
+            "-- values ('PEGAR-UUID-DEL-USUARIO', 'client_pro_1', 'admin')",
+            "-- on conflict do nothing;",
+            "--",
+            "-- Roles: 'admin' (gestiona usuarios del tenant), 'office', 'collector'.",
+            "-- ============================================================================",
             ""
           ].join("\n");
           var blob = new Blob([sqlScript], {type: 'text/plain;charset=utf-8'});
@@ -10248,6 +10519,52 @@
         });
       }
 
+      // 3b. Login / logout con Supabase Auth (la nube exige sesión con JWT)
+      var btnSupaLogin = document.getElementById('btnSupaLogin');
+      if (btnSupaLogin) {
+        btnSupaLogin.addEventListener('click', async function () {
+          var url = (document.getElementById('supaUrlInput').value || '').trim().replace(/\/$/, '');
+          var key = (document.getElementById('supaKeyInput').value || '').trim();
+          var email = (document.getElementById('supaAuthEmail').value || '').trim();
+          var pass = document.getElementById('supaAuthPass').value || '';
+          var statusEl = document.getElementById('supaSyncStatusText');
+          if (!url || !key) { showToast('Primero pega tu Supabase URL y Anon Key'); return; }
+          if (!email || !pass) { showToast('Escribe tu email y contraseña'); return; }
+          saasMeta.supaUrl = url;
+          saasMeta.supaKey = key;
+          saveSaasMeta();
+          try {
+            if (statusEl) statusEl.textContent = 'Verificando credenciales...';
+            await supaLogin(email, pass);
+            var members = await supaFetchMembers();
+            renderSupaAuthState();
+            if (!members || !members.length) {
+              if (statusEl) statusEl.textContent = '⚠️ Sesión activa pero sin empresas asignadas (pide a tu admin que te vincule)';
+              showToast('Sesión activa, sin empresas asignadas');
+            } else {
+              var ok = members.some(function (m) { return m.tenant_id === saasMeta.activeTenant; });
+              if (!ok) { saasMeta.activeTenant = members[0].tenant_id; saveSaasMeta(); }
+              if (statusEl) statusEl.textContent = '✅ Sesión activa (' + members.length + ' empresa(s) disponible(s))';
+              showToast('🔓 Sesión iniciada: ' + email);
+            }
+          } catch (err) {
+            supaLogout();
+            if (statusEl) statusEl.textContent = '⚠️ No se pudo iniciar sesión (verifica email/contraseña y haber corrido el SQL v2)';
+            showToast('Error de login: ' + (err && err.message ? err.message : 'desconocido'));
+          }
+        });
+      }
+      var btnSupaLogout = document.getElementById('btnSupaLogout');
+      if (btnSupaLogout) {
+        btnSupaLogout.addEventListener('click', function () {
+          supaLogout();
+          var statusEl = document.getElementById('supaSyncStatusText');
+          if (statusEl) statusEl.textContent = 'Modo Local Activo (sesión cerrada)';
+          showToast('🔒 Sesión cerrada');
+        });
+      }
+      renderSupaAuthState();
+
       var btnPushSupa = document.getElementById('btnSupaPushCloud');
       if (btnPushSupa) {
         btnPushSupa.addEventListener('click', async function () {
@@ -10262,17 +10579,13 @@
             showToast('Respaldo local actualizado (Pega tus credenciales de Supabase cuando las tengas)');
             return;
           }
+          if (!supaRequireLogin()) return;
           try {
             if (statusEl) statusEl.textContent = 'Sincronizando con Supabase Cloud...';
             var rawPayload = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
-            var res = await fetch(url + '/rest/v1/inmoguate_tenants', {
+            var res = await supaFetchWithAuth(url + '/rest/v1/inmoguate_tenants', {
               method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'apikey': key,
-                'Authorization': 'Bearer ' + key,
-                'Prefer': 'resolution=merge-duplicates'
-              },
+              headers: { 'Prefer': 'resolution=merge-duplicates' },
               body: JSON.stringify({
                 tenant_id: saasMeta.activeTenant || 'default',
                 business_name: receiptSettings.business || 'InmoGuate',
@@ -10289,8 +10602,8 @@
               throw new Error('HTTP ' + res.status);
             }
           } catch (err) {
-            if (statusEl) statusEl.textContent = '⚠️ No se pudo conectar a Supabase (Verifica URL, Key y haber corrido el SQL)';
-            showToast('Verifica tu conexión o credenciales de Supabase');
+            if (statusEl) statusEl.textContent = '⚠️ No se pudo sincronizar (verifica tu sesión y que tu usuario tenga esta empresa asignada)';
+            showToast('Verifica tu sesión o tus permisos en Supabase');
           }
         });
       }
@@ -10305,12 +10618,11 @@
             showToast('Primero ingresa tu Supabase URL y Anon Key');
             return;
           }
+          if (!supaRequireLogin()) return;
           try {
             if (statusEl) statusEl.textContent = 'Descargando datos desde Supabase Cloud...';
             var tenantId = encodeURIComponent(saasMeta.activeTenant || 'default');
-            var res = await fetch(url + '/rest/v1/inmoguate_tenants?tenant_id=eq.' + tenantId + '&select=payload', {
-              headers: { 'apikey': key, 'Authorization': 'Bearer ' + key }
-            });
+            var res = await supaFetchWithAuth(url + '/rest/v1/inmoguate_tenants?tenant_id=eq.' + tenantId + '&select=payload', {});
             var rows = await res.json();
             if (Array.isArray(rows) && rows[0] && rows[0].payload && rows[0].payload.clients) {
               localStorage.setItem(STORAGE_KEY, JSON.stringify(rows[0].payload));
