@@ -5844,6 +5844,7 @@
           a.click();
           a.remove();
           setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+          saasMeta.lastBackupAt = Date.now(); saveSaasMeta();
           showToast('Copia de seguridad descargada');
         });
       }
@@ -9853,6 +9854,7 @@
             a.remove();
             setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
             recordAuditEvent('RESPALDO CIFRADO AES-256', 'Archivo .enc.json exportado con PBKDF2 + AES-GCM');
+            saasMeta.lastBackupAt = Date.now(); saveSaasMeta();
             showToast('🔐 Respaldo cifrado AES-256 descargado con éxito');
           } catch (err) {
             showToast('Error al cifrar el respaldo');
@@ -10604,6 +10606,21 @@
       }
       renderSupaAuthState();
 
+      // Recordatorio de respaldo: si hay datos reales y llevas 7+ días sin exportar
+      (function backupReminder() {
+        try {
+          var raw = localStorage.getItem(STORAGE_KEY) || '{}';
+          var hasData = raw.length > 5000;
+          var last = saasMeta.lastBackupAt || 0;
+          var days = (Date.now() - last) / 86400000;
+          if (hasData && days > 7) {
+            setTimeout(function () {
+              showToast('💾 Llevas ' + Math.floor(days) + ' días sin respaldo — expórtalo desde "Exportar respaldo" en el menú lateral');
+            }, 5000);
+          }
+        } catch (e) {}
+      })();
+
       var btnPushSupa = document.getElementById('btnSupaPushCloud');
       if (btnPushSupa) {
         btnPushSupa.addEventListener('click', async function () {
@@ -10621,6 +10638,28 @@
           if (!supaRequireLogin()) return;
           try {
             if (statusEl) statusEl.textContent = 'Sincronizando con Supabase Cloud...';
+            // Guardia anti-sobrescritura: si la nube trae cambios más nuevos que
+            // nuestra última sincronización, preguntar antes de pisarlos.
+            try {
+              var guardTenant = encodeURIComponent(saasMeta.activeTenant || 'default');
+              var guardRes = await supaFetchWithAuth(url + '/rest/v1/inmoguate_tenants?tenant_id=eq.' + guardTenant + '&select=updated_at', {});
+              if (guardRes.ok) {
+                var guardRows = await guardRes.json();
+                var lastSync = saasMeta.lastCloudSyncAt || 0;
+                if (guardRows && guardRows[0] && guardRows[0].updated_at) {
+                  var cloudTime = new Date(guardRows[0].updated_at).getTime();
+                  if (cloudTime > lastSync + 5000) {
+                    var cloudWhen = new Date(guardRows[0].updated_at).toLocaleString();
+                    var dlFirst = confirm('⚠️ La nube tiene cambios más recientes (' + cloudWhen + ').\n\nOK = Descargar primero (tus cambios locales no subidos se pierden — expórtalos antes si los necesitas)\nCancelar = Subir y sobrescribir la nube');
+                    if (dlFirst) {
+                      var pullBtn = document.getElementById('btnSupaPullCloud');
+                      if (pullBtn) pullBtn.click();
+                      return;
+                    }
+                  }
+                }
+              }
+            } catch (guardErr) { /* si la guardia falla, seguir con el push normal */ }
             var rawPayload = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
             var res = await supaFetchWithAuth(url + '/rest/v1/inmoguate_tenants', {
               method: 'POST',
@@ -10636,6 +10675,7 @@
             if (res.ok) {
               if (statusEl) statusEl.textContent = '✅ Sincronizado con Supabase Cloud (' + formatTimeNow() + ')';
               recordAuditEvent('SYNC SUPABASE PUSH', 'Datos subidos al tenant ' + saasMeta.activeTenant);
+              saasMeta.lastCloudSyncAt = Date.now(); saveSaasMeta();
               showToast('☁️ ¡Datos sincronizados con éxito en Supabase Cloud!');
             } else {
               throw new Error('HTTP ' + res.status);
@@ -10675,6 +10715,7 @@
               renderReservationsDashboard();
               renderRentals();
               if (statusEl) statusEl.textContent = '✅ Datos descargados de la nube (' + formatTimeNow() + ')';
+              saasMeta.lastCloudSyncAt = Date.now(); saveSaasMeta();
               showToast('☁️ Base de datos actualizada desde la nube');
             } else {
               showToast('No se encontraron datos previos para este tenant en la nube');
