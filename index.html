@@ -1096,6 +1096,11 @@
     .countdown-banner { margin:10px 0; padding:11px 13px; border-radius:11px; background:#e8e4fa; color:#2b2163; border:1px solid #8c80cf; font-size:11px; line-height:1.45; }
     .countdown-banner.expired { background:var(--red-soft); color:var(--red); border-color:var(--red); }
     .countdown-banner strong { display:block; font-size:12px; margin-bottom:2px; }
+    .storage-banner { display:none; position:fixed; top:0; left:0; right:0; z-index:120; align-items:center; gap:10px; padding:10px 14px; background:var(--red-soft); color:var(--red); border-bottom:2px solid var(--red); font-size:12px; font-weight:600; line-height:1.4; box-shadow:0 2px 12px rgba(0,0,0,.18); }
+    .storage-banner .storage-msg { flex:1; }
+    .storage-banner .storage-actions { display:flex; gap:8px; align-items:center; flex:none; }
+    .storage-banner .sb-export { background:var(--red); color:#fff; border:none; border-radius:8px; padding:8px 12px; font-size:12px; font-weight:700; cursor:pointer; }
+    .storage-banner .sb-dismiss { background:transparent; color:var(--red); border:1px solid var(--red); border-radius:8px; padding:7px 10px; font-size:12px; font-weight:700; cursor:pointer; }
     .reservations-strip { margin-top:16px; background:var(--surface); border:1px solid var(--line); border-radius:18px; padding:18px 20px; box-shadow:var(--shadow); }
     .reservations-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(250px, 1fr)); gap:12px; margin-top:12px; }
     .res-card { border:1px solid #8c80cf; background:color-mix(in srgb, #e8e4fa 35%, var(--surface)); border-radius:14px; padding:14px; display:flex; flex-direction:column; justify-content:space-between; gap:10px; }
@@ -3614,6 +3619,15 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
+  <div class="storage-banner" id="storageFailureBanner" role="alert" aria-live="assertive" style="display:none">
+    <svg class="icon" aria-hidden="true"><use href="#i-alert"/></svg>
+    <span class="storage-msg"></span>
+    <span class="storage-actions">
+      <button type="button" class="sb-export" id="btnStorageExport">Exportar respaldo ahora</button>
+      <button type="button" class="sb-dismiss" id="btnStorageDismiss" aria-label="Ocultar aviso">✕</button>
+    </span>
+  </div>
+
   <svg width="0" height="0" style="position:absolute" aria-hidden="true">
     <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5V21h-6v-6H9v6H3z"/></symbol>
     <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
@@ -4008,9 +4022,34 @@
             receiptSequence: receiptSequence
           }));
         } catch (e) {
-          console.warn('Error guardando en localStorage', e);
+          warnStorageFailure(e);
         }
       }
+
+      function warnStorageFailure(err) {
+        console.warn('Error guardando en localStorage', err);
+        var banner = document.getElementById('storageFailureBanner');
+        if (!banner) return;
+        var isQuota = !!err && (err.name === 'QuotaExceededError' || err.code === 22 || err.code === 1014);
+        var msg = banner.querySelector('.storage-msg');
+        if (msg) msg.textContent = isQuota
+          ? 'Almacenamiento del navegador lleno: tus cambios NO se están guardando. Exporta un respaldo ahora o conecta la nube antes de seguir trabajando.'
+          : 'El guardado local falló: tus cambios podrían perderse al recargar. Exporta un respaldo ahora.';
+        banner.style.display = 'flex';
+      }
+      (function wireStorageBanner() {
+        var btnExp = document.getElementById('btnStorageExport');
+        if (btnExp) btnExp.addEventListener('click', function () {
+          var b = document.getElementById('btnExportBackup');
+          if (b) b.click();
+          else showToast('Abre el menú y usa Exportar respaldo');
+        });
+        var btnDis = document.getElementById('btnStorageDismiss');
+        if (btnDis) btnDis.addEventListener('click', function () {
+          var banner = document.getElementById('storageFailureBanner');
+          if (banner) banner.style.display = 'none';
+        });
+      })();
 
       function formatDateToday() {
         return new Intl.DateTimeFormat('es-GT', {day:'numeric', month:'short', year:'numeric'}).format(new Date());
